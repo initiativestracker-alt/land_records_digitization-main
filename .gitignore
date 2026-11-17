@@ -1,0 +1,13 @@
+/data/
+/POC Samples/
+/LPS.zip
+/.venv/
+__pycache__/
+.env
+node_modules/
+/node_modules
+*.tsbuildinfo
+.~lock.*#
+frontend/dist/
+output/
+.playwright-cli/
