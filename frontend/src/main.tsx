@@ -6,7 +6,7 @@ import AnnotatedView, {type Annotation, type PageInfo} from './AnnotatedView'
 type Region = {page:number,box:number[]}
 type Entry = {id:string,parent_id?:string,entry_type:string,label?:string,status:string,regions:Region[],attributes:Record<string,Record<string,string>[]>,reasons:string[],review_status:string,signals?:{ocr_score_p10:number|null,ocr_agreement:number|null,ocr_word_count:number,paddle_word_count:number,deletion_strokes:unknown[]},field_evidence?:Record<string,{basis:string,sources?:{page:number,box:number[],quote:string}[],rule_source?:string}>,extraction_error?:string}
 type Folio = {source_id:string,source_filename:string,folio_name?:string,revision:number,metadata:Record<string,string>,metadata_reviewed:boolean,pages:PageInfo[],annotations?:Annotation[],entries:Entry[],issues:{code:string,message:string,page?:number,boxes?:number[][]}[],issues_acknowledged?:{note:string}}
-type Batch = {id:string,created:string,status:string,source_ids:string[],completed:string[],errors:Record<string,string>,progress:Record<string,string>,downloads_ready:boolean}
+type Batch = {id:string,created:string,updated:string,status:string,source_ids:string[],sources?:Record<string,{filename:string}>,completed:string[],errors:Record<string,string>,progress:Record<string,string>,downloads_ready:boolean}
 type Source = {id:string,filename:string,folio_name?:string,kind?:string,page_count:number,uploaded_at?:string|null}
 type Summary = {source_id:string,source_filename:string,metadata:Record<string,string>,entries:number,reviewed:number,issues:number}
 type Schema = {tables:Record<string,Record<string,{rule:string,source:string}>>,groups:Record<string,string[]>,types:string[],warnings:string[]}
@@ -29,8 +29,9 @@ function App() {
   const [page,setPage] = useState(1), [zoom,setZoom] = useState(100), [busy,setBusy] = useState(false), [error,setError] = useState(''), [notice,setNotice] = useState(''), [mergeIds,setMergeIds] = useState<Set<string>>(new Set())
   const [note,setNote] = useState(''), [showGaps,setShowGaps] = useState(false), [drawing,setDrawing] = useState(false), [drawStart,setDrawStart] = useState<number[]|null>(null), [drawBox,setDrawBox] = useState<number[]|null>(null)
   const [dirty,setDirty] = useState(false), [extracting,setExtracting] = useState(false)
-  const [view,setView] = useState<'review'|'annotated'>('review'), [folders,setFolders] = useState<{path:string,name:string,files:File[]}[]>([])
+  const [view,setView] = useState<'review'|'annotated'>('review'), [folders,setFolders] = useState<{path:string,name:string,files:File[]}[]>([]), [now,setNow] = useState(Date.now())
   const active = batches.some(b=>['queued','running'].includes(b.status))
+  useEffect(()=>{ const t=setInterval(()=>setNow(Date.now()),1000); return ()=>clearInterval(t) },[])
 
   async function refresh() { const [s,b,sc] = await Promise.all([api<Source[]>('/sources'),api<Batch[]>('/batches'),api<Schema>('/schema')]); setSources(s);setBatches(b);setSchema(sc); return b }
   useEffect(()=>{ refresh().then(b=>{ const id=new URLSearchParams(location.search).get('batch');if(id) loadBatch(id);else if(b.length) loadBatch(b[0].id) }).catch(e=>setError(e.message)) },[])
@@ -87,7 +88,32 @@ function App() {
           <div className="card-footer"><span>{selected.size} folios selected</span><button className="button primary" disabled={busy||active||!selected.size} onClick={()=>task(async()=>{const b=await post<Batch>('/batches',{source_ids:[...selected]});await loadBatch(b.id);setSelected(new Set())})}>{active?'Batch in progress':'Start extraction →'}</button></div>
         </section>
         {batch&&<section className="card results-card"><div className="section-heading"><div><div className="eyebrow">BATCH {batch.id.slice(0,8).toUpperCase()}</div><h2>{batch.downloads_ready?'Extraction complete. Your workbook is ready.':batch.status==='interrupted'?'Batch interrupted':'Processing your folios'}</h2><p>{batch.completed.length} of {batch.source_ids.length} complete · {Object.keys(batch.errors).length} failures</p></div><span className={`status-pill ${batch.downloads_ready?'ready':''}`}>{batch.status.replaceAll('_',' ')}</span></div>
-          {!batch.downloads_ready&&<><div className="progress"><div style={{width:`${batch.completed.length/batch.source_ids.length*100}%`}}/></div><div className="progress-items">{Object.entries(batch.progress).filter(([id])=>!batch.completed.includes(id)).map(([id,stage])=><p key={id}><strong>{id}</strong><span>{stage}</span></p>)}</div></>}
+          {!batch.downloads_ready&&(() => {
+            const pct = Math.round(batch.completed.length / batch.source_ids.length * 100)
+            const updatedAt = new Date(batch.updated).getTime()
+            const secondsAgo = Math.max(0, Math.floor((now - updatedAt) / 1000))
+            const stale = ['queued','running'].includes(batch.status) && secondsAgo > 90
+            const elapsed = Math.floor((now - new Date(batch.created).getTime()) / 1000)
+            const fmtTime = (s:number) => s>=3600 ? `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m` : s>=60 ? `${Math.floor(s/60)}m ${s%60}s` : `${s}s`
+            const stageEntries = Object.entries(batch.progress).filter(([id])=>!batch.completed.includes(id))
+            const stageLines = stageEntries.map(([id,stage])=>{
+              const filename = batch.sources?.[id]?.filename || sources.find(s=>s.id===id)?.filename || id
+              return {filename,stage}
+            })
+            const headline = stageLines[0]?.stage || 'Waiting to start'
+            return (<>
+              <div className="progress"><div style={{width:`${pct}%`}}/></div>
+              <div className="progress-status">
+                <span className="progress-headline" title={headline}>{headline}</span>
+                <span className={`progress-heartbeat ${stale?'stale':'ok'}`}>
+                  {stale ? `⚠ No progress for ${fmtTime(secondsAgo)} — worker may have stopped` : `Updated ${secondsAgo}s ago`}
+                </span>
+                <span className="progress-elapsed">Elapsed {fmtTime(elapsed)} · {batch.completed.length}/{batch.source_ids.length} folios</span>
+              </div>
+              {stale && <div className="alert warn">Extraction hasn't reported progress in over 90s. The worker may have been interrupted (e.g. by a service restart). <button className="text-button" onClick={()=>task(async()=>{await post(`/batches/${batch.id}/interrupt`);await post(`/batches/${batch.id}/resume`);await loadBatch(batch.id)})}>Recover & resume</button></div>}
+              {stageLines.length>0 && <div className="progress-items">{stageLines.map(({filename,stage})=><p key={filename}><strong title={filename}>{filename.replace(/\.[^.]+$/,'')}</strong><span>{stage}</span></p>)}</div>}
+            </>)
+          })()}
           {batch.downloads_ready&&<div className="download-banner"><div className="download-symbol">↓</div><div><strong>Download before review</strong><p>The extracted snapshot includes provisional values and review flags.</p></div><a className="button primary" href={`${rootDownload}?version=current&format=manual`}>Manual-format workbook ↓</a><a className="button secondary" href={`${rootDownload}?version=extracted`}>Original CSVs</a><a className="button secondary" href={`${rootDownload}?version=current`}>Current CSVs</a>{summaries.length===batch.source_ids.length&&summaries.every(f=>f.reviewed===f.entries)&&<a className="button secondary" href={`${rootDownload}?version=reviewed`}>Reviewed CSVs</a>}</div>}
           {Object.keys(batch.errors).length>0&&<div className="error-list">{Object.entries(batch.errors).map(([id,msg])=><p key={id}><strong>{id}</strong> — {msg}</p>)}</div>}
           {summaries.length>0&&<div className="table-scroll"><table><thead><tr><th>Folio / source</th><th>Entries</th><th>Review</th><th>Actions</th></tr></thead><tbody>{summaries.map(f=><tr key={f.source_id}><td><strong>{f.metadata.folio_number||'Identity to confirm'}</strong><small>{f.metadata.county||'County unknown'} · {f.source_filename}</small></td><td>{f.entries}</td><td><span className="status-pill">{f.reviewed}/{f.entries} reviewed</span>{f.issues>0&&<small>{f.issues} structural checks</small>}</td><td><div className="row-actions">{batch.downloads_ready&&<a href={`/api/batches/${batch.id}/folios/${f.source_id}/csv?version=extracted`}>CSV ↓</a>}<button className="text-button" disabled={!batch.downloads_ready||busy} onClick={()=>task(()=>openFolio(f.source_id))}>Review →</button></div></td></tr>)}</tbody></table></div>}
