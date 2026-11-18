@@ -215,8 +215,11 @@ def create_app(state_call, launch_batch, ingest_pdf, reextract, cancel_batch, re
         if version == "reviewed": require_reviewed([value])
         content = (await asyncio.to_thread(read_artifact, str(Path(value["directory"]) / "extracted.csv"))
                    if version == "extracted" else csv_bytes(value))
+        batch = await call("batch", id=batch_id)
+        source_filename = batch.get("sources", {}).get(source_id, {}).get("filename", source_id)
+        stem = Path(source_filename).stem or source_id
         return Response(content, media_type="text/csv; charset=utf-8",
-                        headers={"Content-Disposition": f'attachment; filename="{source_id}-{version}.csv"'})
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.csv"'})
 
     @app.get("/api/batches/{batch_id}/download")
     async def download_batch(batch_id: str, version: str = "extracted", format: str = "csv"):
