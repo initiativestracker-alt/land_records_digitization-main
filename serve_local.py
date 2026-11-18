@@ -2,8 +2,10 @@
 
 Serves the same ASGI app as the deployed service: the built UI, the API, page
 images and exports, authenticated with HTTP Basic. Extraction runs in local
-threads instead of Modal containers, and the GPU PaddleOCR step is replaced by a
-Tesseract-only stub (see gpu_ocr below).
+threads instead of Modal containers. The GPU PaddleOCR step calls the deployed
+Modal ``DocumentOCR`` function remotely (hybrid mode) so this server produces
+the same high-quality OCR/layout evidence as the Modal deployment; if Modal is
+unreachable it falls back to a Tesseract-only stub (see gpu_ocr below).
 
 Usage:
     python serve_local.py
@@ -20,6 +22,12 @@ Configuration (environment, or a .env file beside this script):
 External programs that must be on PATH:
     tesseract                     all extraction
     pdfinfo, pdfseparate, pdftoppm   PDF ingest and page rendering (Poppler)
+
+For hybrid OCR (Modal DocumentOCR), the local environment must have a Modal
+token for the workspace where folio-digitization is deployed, and the
+``DocumentOCR`` function must be deployed. Set the token with
+``modal token new`` or ``modal token set``; the client reads it from
+~/.modal.toml or the MODAL_TOKEN_ID / MODAL_TOKEN_SECRET environment variables.
 """
 
 import hashlib
@@ -53,13 +61,27 @@ cancellations = {}
 
 
 def gpu_ocr(images):
-    """Stand-in for the Modal PaddleOCR class.
+    """Run GPU PaddleOCR via the deployed Modal DocumentOCR function.
 
-    Layout and table hints are unavailable locally, so entries lose the
-    independent OCR cross-check and review as OCR_DISAGREEMENT. Tesseract still
-    supplies the word-level evidence the pipeline anchors values to.
+    Returns full word, layout and table evidence identical to the Modal
+    deployment, so this server produces the same high-quality extraction.
+    If Modal is unreachable (no token, network failure, or the function is not
+    deployed), falls back to a Tesseract-only result and logs a warning — the pipeline
+    still completes but loses the independent OCR cross-check.
     """
-    return [{"words": [], "layout": [], "tables": [], "models": {"engine": "tesseract-only"}} for _ in images]
+    try:
+        import modal
+        ocr = modal.Cls.from_name("folio-digitization", "DocumentOCR")()
+        return ocr.run.remote(images)
+    except Exception as error:
+        import traceback
+        print(f"WARNING: Modal DocumentOCR unavailable "
+              f"({type(error).__name__}: {error}); "
+              f"falling back to Tesseract-only OCR. "
+              f"OCR cross-check will be unavailable.")
+        traceback.print_exc()
+        return [{"words": [], "layout": [], "tables": [],
+                 "models": {"engine": "tesseract-only"}} for _ in images]
 
 
 def progress_reporter(batch_id, attempt, source_id):
